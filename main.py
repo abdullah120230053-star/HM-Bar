@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 import psutil
 import winreg
 import ctypes
@@ -13,6 +14,13 @@ import os
 import webbrowser
 import subprocess
 
+from preferences import PREFERENCES, read_json, save_preferences
+from app_launcher import AppLauncher
+from elided_label import ElidedLabel
+from media_icon import MediaIcon
+from media_seek import MediaSeekBar
+from visibility_hotkey import VisibilityHotkey
+from workspace import THEMES, Workspace
 from app_styles import get_stylesheet
 from perf_monitor import PerfMonitor
 from media_monitor import MediaMonitor
@@ -23,7 +31,7 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QMenu, QPushButton, QGraphicsOpacityEffect, 
                              QGridLayout, QFrame, QProgressBar, QInputDialog,
                              QDialog, QLineEdit, QListWidget, QListWidgetItem,
-                             QComboBox, QScrollArea)
+                             QComboBox, QScrollArea, QColorDialog, QMessageBox)
 
                
 DWMWA_SYSTEMBACKDROP_TYPE = 38
@@ -36,6 +44,13 @@ DEFAULT_TASKS = [
     {"name": "Gym Session", "category": "Health", "color": "#00FF80", "time": "5:30 PM"},
     {"name": "Dinner with Family", "category": "Personal", "color": "#FF5050", "time": "8:00 PM"}
 ]
+
+def run_quick_action(command):
+    if command.startswith(("https://", "http://")):
+        webbrowser.open(command)
+    else:
+        subprocess.Popen(command, shell=True)
+
 
 class ControlBall(QPushButton):
     def __init__(self, parent=None):
@@ -67,11 +82,10 @@ class ControlBall(QPushButton):
         
     def execute_action(self):
         if self.action_cmd:
-            if isinstance(self.action_cmd, str) and self.action_cmd.startswith("http"):
-                webbrowser.open(self.action_cmd)
-            else:
-                try: subprocess.Popen(self.action_cmd, shell=True)
-                except: pass
+            try:
+                run_quick_action(self.action_cmd)
+            except OSError:
+                pass
 
     def animate_to(self, pos, opacity, scale=1.0, duration=600, delay=0):
         if hasattr(self, "_current_anim"):
@@ -110,6 +124,8 @@ class ControlBall(QPushButton):
 class DynamicIsland(QWidget):
     def __init__(self):
         super().__init__()
+        self.setWindowTitle("HM-Bar")
+        self.setAcceptDrops(True)
         
                                                                         
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | 
@@ -182,7 +198,7 @@ class DynamicIsland(QWidget):
         self.IDLE_W, self.IDLE_H = 180, 40
         self.EXP_W, self.EXP_H = 340, 100
         self.PERF_W, self.PERF_H = 360, 180
-        self.MUSIC_W, self.MUSIC_H = 420, 40
+        self.MUSIC_W, self.MUSIC_H = 420, 76
         self.NOTIFY_W, self.NOTIFY_H = 380, 40
         self.WEATHER_W, self.WEATHER_H = 360, 160
         self.CALENDAR_W, self.CALENDAR_H = 420, 165
@@ -199,7 +215,13 @@ class DynamicIsland(QWidget):
         self.current_feature_index = 0
         self.showing_lyrics = False
         self.media_lyric_text = ""
-        self.LYRIC_W = 640
+        self.pending_lyric = ""
+        self.cover = QPixmap()
+        self.cover_intro = QTimer(self, singleShot=True)
+        self.cover_intro.timeout.connect(self.finish_cover_intro)
+        self.cover_entrance = False
+        self.COMPACT_LYRIC_W = 350
+        self.EXPANDED_LYRIC_W = 425
         
                             
         self.basic_controls_index = 0
@@ -223,7 +245,8 @@ class DynamicIsland(QWidget):
         self.load_settings()
         self.setup_monitors()
         self.init_ui()
-        self.setup_autostart()
+        self.workspace = Workspace(self)
+        self.apply_theme()
         
         self.master_timer = QTimer(self); self.master_timer.timeout.connect(self.update_content); self.master_timer.start(1000)
         self.anim_timer = QTimer(self); self.anim_timer.timeout.connect(self.update_animation); self.anim_timer.start(16)
@@ -234,10 +257,75 @@ class DynamicIsland(QWidget):
         
         self.anim_group = QParallelAnimationGroup()
         self.opacity_anim = QPropertyAnimation(self.content_opacity, b"opacity"); self.opacity_anim.setDuration(850); self.opacity_anim.setEasingCurve(QEasingCurve.Type.InOutSine)
-        self.content_pos_anim = QPropertyAnimation(self.content_container, b"pos"); self.content_pos_anim.setDuration(850); self.content_pos_anim.setEasingCurve(QEasingCurve.Type.OutExpo)
         
         self.anim_group.addAnimation(self.island_w_anim); self.anim_group.addAnimation(self.island_h_anim)
-        self.anim_group.addAnimation(self.opacity_anim); self.anim_group.addAnimation(self.content_pos_anim)
+        self.anim_group.addAnimation(self.opacity_anim)
+        self.transition_refresh = QTimer(self, singleShot=True)
+        self.transition_refresh.timeout.connect(self.update_feature_view)
+        self.preferences = None
+        self.refresh_preferences()
+        self.preferences_timer = QTimer(self, interval=1000)
+        self.preferences_timer.timeout.connect(self.refresh_preferences)
+        self.preferences_timer.start()
+        self.launcher = self.create_launcher()
+        self.launcher_panel_hold = QTimer(self, singleShot=True)
+        self.visibility_hotkey = VisibilityHotkey(QApplication.instance(), int(self.winId()), self.toggle_visibility)
+
+
+    def refresh_preferences(self):
+        preferences = read_json(PREFERENCES)
+        if preferences == self.preferences:
+            return
+        old = self.preferences or {}
+        self.preferences = preferences
+        for key in ("theme", "custom_accent", "island_style", "animation_style"):
+            if key in preferences:
+                self.settings[key] = preferences[key]
+        self.island_style = self.settings.get("island_style", "Default")
+        self.animation_style = self.settings.get("animation_style", "Fluid Blobs")
+        self.media_monitor.priority = preferences.get("media_priority", "Auto")
+        self.media_monitor.lyrics_enabled = preferences.get("lyrics_enabled", True)
+        if not self.media_monitor.lyrics_enabled:
+            self.pending_lyric = ""
+            self.showing_lyrics = False
+            self.media_lyric_text = ""
+        panel = preferences.get("default_panel")
+        if panel != old.get("default_panel"):
+            feature = "perf" if panel == "Performance" else str(panel).lower()
+            if feature in self.features:
+                self.current_feature_index = self.features.index(feature)
+        self.apply_theme()
+        self.recenter_window()
+        self.update_island_geometry(self.get_island_rect(), self.get_current_radius())
+        self.execute_liquid_transition()
+
+    def open_settings(self):
+        if getattr(sys, "frozen", False):
+            command = [str(Path(sys.executable).with_name("HM-Bar-Settings.exe"))]
+        else:
+            command = [sys.executable, str(Path(__file__).with_name("settings_app.py"))]
+        try:
+            subprocess.Popen(command)
+        except OSError as error:
+            QMessageBox.warning(self, "Open settings", str(error))
+
+    def show_compact_media(self):
+        preferences = getattr(self, "preferences", None) or {}
+        return preferences.get("show_now_playing", True) and self.media_state in ("Playing", "Paused")
+
+    def update_media_source(self, source):
+        self.cover = QPixmap()
+        self.cover_entrance = False
+        if source:
+            label = "Spotify" if "spotify" in source.lower() else source
+            self.status_text.setToolTip(f"Media source: {label}")
+            if (self.preferences or {}).get("auto_open_media", True):
+                self.current_feature_index = self.features.index("media")
+                if self.current_state == "Hover":
+                    self.execute_liquid_transition()
+        else:
+            self.status_text.setToolTip("")
+
 
     @pyqtProperty(float)
     def weather_bg_opacity(self): return self._weather_bg_opacity
@@ -265,11 +353,16 @@ class DynamicIsland(QWidget):
         else:
             base_path = os.path.dirname(os.path.abspath(__file__))
             
-        self.config_path = os.path.join(base_path, "config.json")
-        
-        if os.path.exists(self.config_path):
+        profile = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "DynamicIslandPro"
+        profile.mkdir(parents=True, exist_ok=True)
+        self.config_path = profile / "settings.json"
+        source = self.config_path if self.config_path.exists() else Path(base_path) / "config.json"
+        if not source.exists():
+            source = Path(__file__).with_name("config.json")
+
+        if source.exists():
             try:
-                with open(self.config_path, "r") as f:
+                with source.open(encoding="utf-8") as f:
                     self.settings = json.load(f)
             except:
                 self.settings = {"location": "Varanasi, India", "lat": 25.3333, "lon": 83.0, "compatibility_mode": False, "tasks": DEFAULT_TASKS}
@@ -297,8 +390,132 @@ class DynamicIsland(QWidget):
         self.settings["island_style"] = self.island_style
         self.settings["animation_style"] = self.animation_style
         # self.settings["tasks"] is updated directly by the task editor or elsewhere
-        with open(self.config_path, "w") as f:
-            json.dump(self.settings, f, indent=4)
+        temporary = self.config_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.settings, indent=4), encoding="utf-8")
+        temporary.replace(self.config_path)
+
+    def apply_theme(self):
+        surface, accent = THEMES.get(self.settings.get("theme"), THEMES["Obsidian"])
+        custom = QColor(self.settings.get("custom_accent", ""))
+        self.accent_color = custom.name() if custom.isValid() else accent or self.get_windows_accent_color()
+        self.surface_color = QColor(surface)
+        self.workspace.apply_theme(surface, self.accent_color)
+        self.media_seek.set_accent(self.accent_color)
+        self.update_content()
+
+    def choose_theme(self, name):
+        self.settings["theme"] = name
+        save_preferences({"theme": name})
+        self.apply_theme()
+        self.save_settings()
+
+    def choose_accent(self):
+        self.is_dialog_open = True
+        try:
+            color = QColorDialog.getColor(QColor(self.accent_color), self, "Custom accent")
+        finally:
+            self.is_dialog_open = False
+        if color.isValid():
+            self.settings["custom_accent"] = color.name()
+            save_preferences({"custom_accent": color.name()})
+            self.apply_theme()
+            self.save_settings()
+
+    def reset_accent(self):
+        self.settings.pop("custom_accent", None)
+        save_preferences({"custom_accent": ""})
+        self.apply_theme()
+        self.save_settings()
+
+    def create_launcher(self):
+        entries = [
+            ("Timer", "mdi.timer-outline", "#b7a6ff", lambda: self.open_workspace_page(0)),
+            ("Spotify", "mdi.spotify", "#70eb9b", self.open_spotify),
+            ("Weather", "mdi.weather-partly-cloudy", "#83c6ff", lambda: self.open_island_panel("weather")),
+            ("Music", "mdi.music", "#f3aaff", lambda: self.open_island_panel("media")),
+            ("Calendar", "mdi.calendar", "#ffa9a3", lambda: self.open_island_panel("calendar")),
+            ("Month", "mdi.calendar-month", "#ffc58b", lambda: self.open_island_panel("month")),
+            ("Notes", "mdi.note-text-outline", "#f6d38d", lambda: self.open_workspace_page(1)),
+            ("File Shelf", "mdi.folder-outline", "#abadff", lambda: self.open_workspace_page(2)),
+            ("Performance", "mdi.speedometer", "#8de9d9", lambda: self.open_island_panel("perf")),
+            ("Quick Apps", "mdi.apps", "#94c9ff", lambda: self.open_island_panel("basics")),
+            ("AirPad", "mdi.cellphone", "#81dfef", lambda: self.open_workspace_page(3)),
+            ("Desktop Tools", "mdi.laptop", "#9dbfff", lambda: self.open_workspace_page(4)),
+            ("Clipboard", "mdi.clipboard-outline", "#9cdaa9", lambda: self.open_workspace_page(5)),
+            ("Themes & Settings", "mdi.cog-outline", "#ded2ff", self.open_settings),
+        ]
+        return AppLauncher(self, entries)
+
+    def open_workspace_page(self, page):
+        self.workspace.tabs.setCurrentIndex(page)
+        self.show_workspace()
+
+    def open_spotify(self):
+        try:
+            os.startfile("spotify:")
+        except OSError:
+            webbrowser.open("https://open.spotify.com/")
+
+    def open_island_panel(self, feature):
+        self.current_feature_index = self.features.index(feature)
+        self.revert_timer.stop()
+        self.current_state = "Hover"
+        self.execute_liquid_transition()
+        self.launcher_panel_hold.start(6000)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.MiddleButton and self.get_island_rect().contains(event.position()):
+            self.open_workspace_page(5)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def dragEnterEvent(self, event):
+        if self.workspace.accepts_stash(event.mimeData()):
+            event.setDropAction(Qt.DropAction.CopyAction)
+            event.accept()
+
+    def dropEvent(self, event):
+        try:
+            self.workspace.stash(event.mimeData())
+        except OSError as error:
+            QMessageBox.warning(self, "File Shelf", str(error))
+            return
+        self.show_workspace()
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.get_island_rect().contains(event.position()):
+            self.revert_timer.stop()
+            rect = self.get_island_rect().toAlignedRect()
+            rect.moveTopLeft(self.mapToGlobal(rect.topLeft()))
+            self.launcher.open_below(
+                rect, self.screen().availableGeometry(),
+                animated=(self.preferences or {}).get("launcher_animations", True),
+            )
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def toggle_visibility(self):
+        if self.isVisible():
+            self.launcher.close()
+            self.revert_timer.stop()
+            self.launcher_panel_hold.stop()
+            self.hide()
+        else:
+            self.current_state = "Idle"
+            self.recenter_window()
+            self.update_feature_view()
+            self.execute_liquid_transition()
+            self.show()
+            self.raise_()
+
+    def show_workspace(self):
+        self.workspace.show()
+        self.workspace.raise_()
+        self.workspace.activateWindow()
 
     def change_location_dialog(self):
         city, ok = QInputDialog.getText(self, "Change Location", "Enter City Name:", text=self.weather_monitor.city)
@@ -333,7 +550,7 @@ class DynamicIsland(QWidget):
 
     def build_notch_path(self, rect):
         radius = self.get_current_radius()
-        scoop = min(radius * 1.4, 25.0)
+        scoop = min(radius * 1.4, 25.0, max(0.0, rect.height() - radius))
         path = QPainterPath()
         path.moveTo(rect.left() - scoop, rect.top())
         path.cubicTo(
@@ -379,13 +596,13 @@ class DynamicIsland(QWidget):
                 painter.setBrush(QColor(0, 0, 0, 15 - i*3))
                 shadow_rect = rect.adjusted(i, 0, -i, -i)
                 painter.drawPath(self.build_notch_path(shadow_rect))
-            painter.setBrush(QBrush(QColor(0, 0, 0)))
+            painter.setBrush(self.surface_color)
             painter.drawPath(notch_path)
         else:
             for i in range(5): 
                 painter.setBrush(QColor(0, 0, 0, 15 - i*3))
                 painter.drawRoundedRect(rect.adjusted(i, i, -i, -i), radius, radius)
-            painter.setBrush(QBrush(QColor(0, 0, 0))); painter.drawRoundedRect(rect, radius, radius)
+            painter.setBrush(self.surface_color); painter.drawRoundedRect(rect, radius, radius)
 
         if self._weather_bg_opacity > 0.0:
             self.paint_weather_bg(painter, rect, radius)
@@ -516,13 +733,28 @@ class DynamicIsland(QWidget):
     def set_charging_phase(self, value): self._charging_phase = value; self.update()
     charging_phase = pyqtProperty(float, get_charging_phase, set_charging_phase)
 
-    def setup_autostart(self):
+    def set_autostart(self, enabled):
         try:
-            app_path = sys.executable if getattr(sys, 'frozen', False) else f'"{sys.executable}" "{sys.argv[0]}"'
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
-            winreg.SetValueEx(key, "DynamicIsland", 0, winreg.REG_SZ, app_path)
-            winreg.CloseKey(key)
-        except Exception as e: print("Autostart error:", e)
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+                if enabled:
+                    executable = Path(sys.executable)
+                    if getattr(sys, "frozen", False):
+                        command = subprocess.list2cmdline([str(executable)])
+                    else:
+                        command = subprocess.list2cmdline([
+                            str(executable.with_name("pythonw.exe")), str(Path(__file__).resolve())
+                        ])
+                    winreg.SetValueEx(key, "DynamicIslandPro", 0, winreg.REG_SZ, command)
+                else:
+                    try:
+                        winreg.DeleteValue(key, "DynamicIslandPro")
+                    except FileNotFoundError:
+                        pass
+        except OSError as error:
+            QMessageBox.warning(self, "Startup setting", str(error))
+            return
+        self.settings["start_with_windows"] = enabled
+        self.save_settings()
 
     def init_ui(self):
         self.main_layout = QVBoxLayout(self); self.main_layout.setContentsMargins(0, 0, 0, 0); self.main_layout.setSpacing(0)
@@ -533,10 +765,10 @@ class DynamicIsland(QWidget):
         self.content_container = QWidget(); self.content_layout = QVBoxLayout(self.content_container); self.content_layout.setContentsMargins(0, 0, 0, 0); self.content_layout.setSpacing(0)
         self.content_opacity = QGraphicsOpacityEffect(self.content_container); self.content_container.setGraphicsEffect(self.content_opacity)
         self.header_widget = QWidget(); self.header_layout = QHBoxLayout(self.header_widget); self.header_layout.setContentsMargins(25, 0, 25, 0); self.header_layout.setSpacing(10)
-        self.status_icon = QLabel(); self.status_icon.setObjectName("IconLabel"); self.status_icon.setFixedSize(22, 22)
+        self.status_icon = MediaIcon(); self.status_icon.setObjectName("IconLabel")
         self.status_icon.setPixmap(qta.icon('mdi.circle', color=self.accent_color).pixmap(20, 20))
-        self.status_text = QLabel(""); self.status_text.setObjectName("TitleLabel")
-        self.header_layout.addWidget(self.status_icon); self.header_layout.addWidget(self.status_text)
+        self.status_text = ElidedLabel(); self.status_text.setObjectName("TitleLabel")
+        self.header_layout.addWidget(self.status_icon); self.header_layout.addWidget(self.status_text, 1)
         self.media_controls = QWidget(); self.media_controls_layout = QHBoxLayout(self.media_controls); self.media_controls_layout.setContentsMargins(0, 0, 0, 0); self.media_controls_layout.setSpacing(2)
         self.btn_prev = QPushButton(icon=qta.icon('mdi.skip-previous', color='white')); self.btn_play = QPushButton(icon=qta.icon('mdi.play', color='white')); self.btn_next = QPushButton(icon=qta.icon('mdi.skip-next', color='white'))
         for b in [self.btn_prev, self.btn_play, self.btn_next]: b.setObjectName("MediaButton")
@@ -546,7 +778,7 @@ class DynamicIsland(QWidget):
         self.cpu_label = QLabel("CPU: 0%"); self.cpu_label.setObjectName("PerfLabel")
         self.ram_label = QLabel("RAM: 0%"); self.ram_label.setObjectName("PerfLabel")
         self.perf_layout.addWidget(self.cpu_label); self.perf_layout.addWidget(self.ram_label)
-        self.header_layout.addStretch(); self.header_layout.addWidget(self.media_controls); self.header_layout.addWidget(self.perf_widget); self.media_controls.hide(); self.perf_widget.hide()
+        self.header_layout.addWidget(self.media_controls); self.header_layout.addWidget(self.perf_widget); self.media_controls.hide(); self.perf_widget.hide()
         
                             
         self.perf_panel = self.create_perf_panel()
@@ -566,6 +798,12 @@ class DynamicIsland(QWidget):
             self.control_balls.append(ball)
         
         self.content_layout.addWidget(self.header_widget)
+        self.media_seek = MediaSeekBar()
+        self.media_seek.hide()
+        self.media_seek.seek_requested.connect(self.media_monitor.seek)
+        self.media_monitor.timeline_updated.connect(self.media_seek.update_timeline)
+        self.media_monitor.seek_completed.connect(self.media_seek.seek_finished)
+        self.content_layout.addWidget(self.media_seek)
         self.content_layout.addWidget(self.perf_panel)
         self.content_layout.addWidget(self.weather_panel)
         self.content_layout.addWidget(self.calendar_panel)
@@ -578,7 +816,7 @@ class DynamicIsland(QWidget):
 
     def setup_monitors(self):
         self.perf_monitor = PerfMonitor(parent=self); self.perf_monitor.metrics_updated.connect(self.update_perf); self.perf_monitor.start()
-        self.media_monitor = MediaMonitor(self); self.media_monitor.media_updated.connect(self.update_media); self.media_monitor.start()
+        self.media_monitor = MediaMonitor(self); self.media_monitor.media_updated.connect(self.update_media); self.media_monitor.source_updated.connect(self.update_media_source); self.media_monitor.artwork_updated.connect(self.update_artwork); self.media_monitor.start()
         self.media_monitor.lyrics_updated.connect(self.update_lyrics)
         self.key_monitor = KeyLockMonitor(self); self.key_monitor.lock_changed.connect(self.show_key_event); self.key_monitor.start()
         self.notif_monitor = NotificationMonitor(self); self.notif_monitor.notification_received.connect(self.show_notification); self.notif_monitor.start()
@@ -1048,19 +1286,50 @@ class DynamicIsland(QWidget):
         btn_l = QPushButton("<", objectName="NavButton"); btn_r = QPushButton(">", objectName="NavButton")
         btn_l.clicked.connect(lambda: self.scroll_controls(-1)); btn_r.clicked.connect(lambda: self.scroll_controls(1))
         lbl = QLabel("Basics"); lbl.setStyleSheet("font-size: 15px; font-weight: 700; color: #BBB; letter-spacing: 1.2px;")
-        l.addWidget(btn_l); l.addWidget(lbl); l.addWidget(btn_r); return w
+        self.quick_action_button = QPushButton(objectName="ActionButton")
+        self.quick_action_button.setMinimumSize(126, 36)
+        self.quick_action_button.clicked.connect(self.run_selected_quick_action)
+        l.addWidget(btn_l)
+        l.addWidget(lbl)
+        l.addWidget(self.quick_action_button)
+        l.addWidget(btn_r)
+        self.basics_label = lbl
+        self.update_quick_action()
+        return w
+
+    def update_quick_action(self):
+        inside = self.island_style == "Notch Nook"
+        self.quick_action_button.setVisible(inside)
+        self.basics_label.setVisible(not inside)
+        item = self.basic_controls_items[self.basic_controls_index]
+        self.quick_action_button.setText(item["name"])
+        self.quick_action_button.setIcon(qta.icon(item["icon"], color="white"))
+
+    def run_selected_quick_action(self):
+        item = self.basic_controls_items[self.basic_controls_index]
+        try:
+            run_quick_action(item["cmd"])
+        except OSError as error:
+            QMessageBox.warning(self, item["name"], str(error))
 
 
 
     def update_content(self):
         if self.current_state == "Idle":
             feature = self.features[self.current_feature_index]
-            if feature == "media" and self.media_state in ("Playing", "Paused"):
+            focus = self.workspace.timer_status() if hasattr(self, "workspace") else ""
+            if focus:
+                self.status_text.setText(focus)
+                self.status_icon.setPixmap(qta.icon("mdi.circle", color=self.accent_color).pixmap(18, 18))
+            elif hasattr(self, "workspace") and self.workspace.desktop_tools.meeting_status():
+                self.status_text.setText(self.workspace.desktop_tools.meeting_status())
+                self.status_icon.setPixmap(qta.icon("mdi.timer-outline", color=self.accent_color).pixmap(18, 18))
+            elif self.show_compact_media():
                 if self.showing_lyrics and self.media_lyric_text:
                     self.status_text.setText(self.media_lyric_text)
                 else:
-                    dt = self.media_title; self.status_text.setText(dt[:22] + "..." if len(dt) > 25 else dt)
-                self.status_icon.setPixmap(qta.icon('mdi.music', color='white').pixmap(18, 18))
+                    self.status_text.setText(self.media_title)
+                self.show_media_icon()
             else:
                 now = datetime.datetime.now(); ts = now.strftime("%I:%M %p").lstrip("0"); self.status_text.setText(f"{now.strftime('%a')}, {ts}")
                 self.status_icon.setPixmap(qta.icon('mdi.circle', color=self.accent_color).pixmap(18, 18))
@@ -1087,25 +1356,80 @@ class DynamicIsland(QWidget):
         self.net_down_L.setText(f"↓ {fmt(down)}"); self.net_up_L.setText(f"↑ {fmt(up)}")
 
     def update_media(self, state, title, artist, accent_hex):
+        was_compact = self.show_compact_media()
+        changed = (title, artist) != (self.media_title, self.media_artist)
+        if changed:
+            self.cover = QPixmap()
+            self.cover_entrance = False
+            self.pending_lyric = ""
+            self.media_lyric_text = ""
+            self.showing_lyrics = False
+            self.cover_intro.stop()
+            if state != "Idle":
+                self.cover_intro.start(self.cover_intro_ms())
         self.media_state, self.media_title, self.media_artist = state, title, artist; self.album_accent_color = QColor(accent_hex)
         if state == "Idle":
             self.showing_lyrics = False
             self.media_lyric_text = ""
         self.btn_play.setIcon(qta.icon('mdi.pause' if state == "Playing" else 'mdi.play', color='white')); self.update_content()
         if self.current_state == "Hover": self.update_feature_view()
+        elif self.current_state == "Idle" and (changed or was_compact != self.show_compact_media()):
+            self.execute_liquid_transition()
+
+    def cover_intro_ms(self):
+        seconds = (self.preferences or {}).get("cover_intro_seconds", 3)
+        return 1000 * max(1, min(8, seconds if isinstance(seconds, int) else 3))
+
+    def update_artwork(self, data):
+        pixmap = QPixmap()
+        if pixmap.loadFromData(data):
+            self.cover = pixmap
+            self.cover_entrance = (self.preferences or {}).get("animate_artwork", True)
+            self.cover_intro.start(self.cover_intro_ms())
+            if self.current_state == "Hover":
+                self.update_feature_view()
+            else:
+                self.update_content()
+
+    def show_media_icon(self):
+        if self.cover.isNull():
+            self.status_icon.setPixmap(qta.icon("mdi.music", color="white").pixmap(18, 18))
+        else:
+            self.status_icon.setPixmap(self.cover, animate=self.cover_entrance)
+            self.cover_entrance = False
+
+    def finish_cover_intro(self):
+        self.update_lyrics(self.pending_lyric)
 
     def update_lyrics(self, text):
+        if not (self.preferences or {}).get("lyrics_enabled", True):
+            text = ""
+        self.pending_lyric = text
+        if self.cover_intro.isActive() and text:
+            return
         was_showing = self.showing_lyrics
         self.media_lyric_text = text
         self.showing_lyrics = bool(text)
-        
-                                                                                  
-        if was_showing != self.showing_lyrics:
+        media_visible = self.current_state == "Idle" and self.show_compact_media()
+        media_visible |= self.current_state == "Hover" and self.features[self.current_feature_index] == "media"
+        if media_visible and was_showing != self.showing_lyrics:
             self.execute_liquid_transition()
+        elif self.current_state == "Hover" and media_visible:
+            self.update_feature_view()
         else:
             self.update_content()
 
+    def toggle_lyrics(self, enabled):
+        try:
+            save_preferences({"lyrics_enabled": enabled})
+        except OSError as error:
+            QMessageBox.warning(self, "Lyrics setting", str(error))
+            return
+        self.refresh_preferences()
+
     def update_feature_view(self):
+        feature = self.features[self.current_feature_index]
+        self.media_seek.setVisible(self.current_state == "Hover" and feature == "media" and not self.is_charging)
         if self.current_state == "Idle":
             self.perf_panel.hide(); self.perf_widget.hide(); self.media_controls.hide(); self.weather_panel.hide(); self.calendar_panel.hide(); self.month_panel.hide(); self.basics_panel.hide()
             self.header_widget.show(); self.update_content(); return
@@ -1114,21 +1438,22 @@ class DynamicIsland(QWidget):
             self.status_icon.setPixmap(qta.icon('mdi.lightning-bolt' if "Lock" in self.event_title else 'mdi.email', color='white').pixmap(18, 18))
             dt = f"{self.event_title} - {self.event_text}"; self.status_text.setText(dt[:45] + "..." if len(dt) > 48 else dt)
             return
-        feature = self.features[self.current_feature_index]
         self.header_widget.show() if feature == "media" else self.header_widget.hide()
         self.perf_panel.setVisible(feature == "perf")
         self.media_controls.setVisible(feature == "media")
         self.weather_panel.setVisible(feature == "weather"); self.calendar_panel.setVisible(feature == "calendar"); self.month_panel.setVisible(feature == "month")
         self.basics_panel.setVisible(feature == "basics")
+        if feature == "basics":
+            self.update_quick_action()
         if feature == "perf": self.status_text.setText("Performance Status"); self.status_icon.setPixmap(qta.icon('mdi.speedometer', color='white').pixmap(18, 18))
         elif feature == "media":
             if self.media_state in ("Playing", "Paused"):
                 if self.showing_lyrics and self.media_lyric_text:
                     self.status_text.setText(self.media_lyric_text)
                 else:
-                    dt = f"{self.media_title} - {self.media_artist}"; self.status_text.setText(dt[:37] + "..." if len(dt) > 40 else dt)
+                    self.status_text.setText(" ? ".join(filter(None, (self.media_title, self.media_artist))))
             else: self.status_text.setText("Music Player")
-            self.status_icon.setPixmap(qta.icon('mdi.music', color='white').pixmap(18, 18))
+            self.show_media_icon()
 
     def wheelEvent(self, event):
         if self.current_state == "Hover" and not self.is_editing_tasks:
@@ -1143,11 +1468,13 @@ class DynamicIsland(QWidget):
 
     def scroll_controls(self, delta):
         n = len(self.basic_controls_items)
-        prev_idx = self.basic_controls_index
         self.basic_controls_index = (self.basic_controls_index + delta) % n
         
                                     
-        self.animate_control_balls(True)
+        if self.island_style == "Notch Nook":
+            self.update_quick_action()
+        else:
+            self.animate_control_balls(True)
         
     def refresh_control_balls(self):
                                                                           
@@ -1229,33 +1556,48 @@ class DynamicIsland(QWidget):
     def execute_liquid_transition(self):
         if self.is_charging: w, h = 850, 40
         elif self.current_state == "Idle": 
-            if self.features[self.current_feature_index] == "media" and self.showing_lyrics:
-                w, h = self.LYRIC_W, self.IDLE_H
+            if self.show_compact_media() and self.showing_lyrics:
+                w, h = self.COMPACT_LYRIC_W, self.IDLE_H
+            elif self.show_compact_media():
+                w, h = 290, self.IDLE_H
             else:
                 w, h = self.IDLE_W, self.IDLE_H
         elif self.current_state == "Notify": w, h = self.NOTIFY_W, self.NOTIFY_H
         else:
             feature = self.features[self.current_feature_index]
-            if feature == "media": w, h = (self.LYRIC_W, self.MUSIC_H) if self.showing_lyrics else (self.MUSIC_W, self.MUSIC_H)
+            if feature == "media": w, h = (self.EXPANDED_LYRIC_W, self.MUSIC_H) if self.showing_lyrics else (self.MUSIC_W, self.MUSIC_H)
             elif feature == "perf": w, h = self.PERF_W, self.PERF_H
             elif feature == "weather": w, h = self.WEATHER_W, self.WEATHER_H
             elif feature == "calendar": 
                 w, h = (self.EDIT_W, self.EDIT_H) if self.is_editing_tasks else (self.CALENDAR_W, self.CALENDAR_H)
             elif feature == "month": w, h = self.MONTH_W, self.MONTH_H
-            elif feature == "basics": w, h = self.IDLE_W, self.IDLE_H                    
+            elif feature == "basics": w, h = (300, 70) if self.island_style == "Notch Nook" else (self.IDLE_W, self.IDLE_H)
             else: w, h = self.EXP_W, self.EXP_H
-        if not self.is_charging:
+        lyrics_visible = self.showing_lyrics and not self.is_charging and (
+            (self.current_state == "Idle" and self.show_compact_media())
+            or (self.current_state == "Hover" and self.features[self.current_feature_index] == "media")
+        )
+        if self.island_style == "Notch Nook" and lyrics_visible:
+            h = max(h, 48)
+        motion = (self.preferences or {}).get("panel_motion", "Smooth")
+        if not self.is_charging and motion != "Reduced":
              self.shine_anim.stop(); self.shine_anim.setStartValue(0.0); self.shine_anim.setEndValue(1.0); self.shine_anim.start()
         
                                       
         def set_bg_target(anim, current_val, target_val):
-            anim.stop(); anim.setStartValue(current_val); anim.setEndValue(target_val); anim.start()
+            anim.stop()
+            if motion == "Reduced":
+                anim.targetObject().setProperty(bytes(anim.propertyName()).decode(), target_val)
+            else:
+                anim.setStartValue(current_val)
+                anim.setEndValue(target_val)
+                anim.start()
 
         is_hover = (self.current_state != "Idle" and self.current_state != "Notify")
         feat = self.features[self.current_feature_index] if is_hover else None
 
                                         
-        self.animate_control_balls(feat == "basics")
+        self.animate_control_balls(feat == "basics" and self.island_style != "Notch Nook")
         
         set_bg_target(self.weather_bg_anim, self._weather_bg_opacity, 1.0 if feat == "weather" else 0.0)
         set_bg_target(self.perf_bg_anim, self._perf_bg_opacity, 1.0 if feat == "perf" else 0.0)
@@ -1263,21 +1605,24 @@ class DynamicIsland(QWidget):
         set_bg_target(self.month_bg_anim, self._month_bg_opacity, 1.0 if feat == "month" else 0.0)
 
         self.anim_group.stop()
-        self.content_pos_anim.setStartValue(QPoint(0, 0))
-        self.content_pos_anim.setEndValue(QPoint(0, 0))
-        self.opacity_anim.setStartValue(1.0); self.opacity_anim.setKeyValueAt(0.3, 0.0); self.opacity_anim.setEndValue(1.0)
-        self.island_w_anim.setStartValue(self._island_w); self.island_w_anim.setEndValue(w)
-        self.island_h_anim.setStartValue(self._island_h); self.island_h_anim.setEndValue(h)
-        QTimer.singleShot(250, self.update_feature_view)
-        QTimer.singleShot(250, lambda: self.reset_content_slide(w))
+        self.transition_refresh.stop()
+        duration = {"Smooth": 490, "Fast": 250, "Reduced": 0}.get(motion, 490)
+        if not duration:
+            self.island_w, self.island_h = w, h
+            self.content_opacity.setOpacity(1.0)
+            self.update_feature_view()
+            return
+        for animation in (self.island_w_anim, self.island_h_anim, self.opacity_anim):
+            animation.setDuration(duration)
+        self.opacity_anim.setStartValue(self.content_opacity.opacity())
+        self.opacity_anim.setKeyValueAt(0.23, 0.18)
+        self.opacity_anim.setEndValue(1.0)
+        self.island_w_anim.setStartValue(self._island_w)
+        self.island_w_anim.setEndValue(w)
+        self.island_h_anim.setStartValue(self._island_h)
+        self.island_h_anim.setEndValue(h)
+        self.transition_refresh.start(int(duration * 0.23))
         self.anim_group.start()
-
-    def reset_content_slide(self, target_w):
-        current_y = self.content_container.y()
-        self.content_pos_anim.stop()
-        self.content_pos_anim.setStartValue(QPoint(target_w // 4, current_y))
-        self.content_pos_anim.setEndValue(QPoint(0, current_y))
-        self.content_pos_anim.start()
 
     def change_state(self, new):
         if self.current_state == new: return
@@ -1285,6 +1630,7 @@ class DynamicIsland(QWidget):
 
     def set_island_style(self, style):
         self.island_style = style
+        save_preferences({"island_style": style})
         self.save_settings()
         self.recenter_window()
         self.execute_liquid_transition()
@@ -1293,11 +1639,12 @@ class DynamicIsland(QWidget):
 
     def set_animation_style(self, style):
         self.animation_style = style
+        save_preferences({"animation_style": style})
         self.save_settings()
         self.update()
 
     def get_island_rect(self):
-        W = self._island_w
+        W = min(self._island_w, max(1, self.width() - 52))
         H = self._island_h
         centerX = self.width() / 2
         if self.island_style == "Notch Nook":
@@ -1312,9 +1659,9 @@ class DynamicIsland(QWidget):
             sr = self.screen().availableGeometry()
             self.setGeometry(sr)
         else:
-            self.setFixedSize(1200, 700)
-            top_y = 0 if self.island_style == "Notch Nook" else 10
-            self.move(self.get_centered_x(self.width()), top_y)
+            sr = self.screen().availableGeometry()
+            self.setFixedSize(min(1200, sr.width()), min(700, sr.height()))
+            self.move(self.get_centered_x(self.width()), sr.top())
 
     def toggle_compatibility_mode(self):
         self.compatibility_mode = not self.compatibility_mode
@@ -1324,7 +1671,10 @@ class DynamicIsland(QWidget):
         self.update()
 
     def check_mouse_position(self):
-        if self.current_state == "Notify" or self.is_dialog_open: return
+        if (not self.isVisible() or self.current_state == "Notify" or self.is_dialog_open
+                or self.launcher.isVisible() or self.launcher_panel_hold.isActive()
+                or self.media_seek.slider.isSliderDown()):
+            return
         cursor_pos = QCursor.pos()
         rect = self.get_island_rect()
         
@@ -1355,8 +1705,32 @@ class DynamicIsland(QWidget):
 
     def contextMenuEvent(self, event):
         menu = QMenu(self); menu.setStyleSheet("QMenu { background-color: #1a1a1a; color: #fff; border: 1px solid #333; padding: 4px; border-radius: 6px; } QMenu::item:selected { background-color: " + self.accent_color + "; }")
+        menu.addAction("Settings?", self.open_settings)
+        menu.addAction("Open Workspace", self.show_workspace)
+        if self.visibility_hotkey.registered:
+            menu.addAction("Hide island (Ctrl+H)", self.toggle_visibility)
+        else:
+            menu.addAction("Ctrl+H unavailable").setEnabled(False)
+        lyrics = menu.addAction("Show synced lyrics")
+        lyrics.setCheckable(True)
+        lyrics.setChecked((self.preferences or {}).get("lyrics_enabled", True))
+        lyrics.triggered.connect(self.toggle_lyrics)
+        themes = menu.addMenu("Theme")
+        for name in THEMES:
+            action = themes.addAction(name)
+            action.setCheckable(True)
+            action.setChecked(self.settings.get("theme", "Obsidian") == name)
+            action.triggered.connect(lambda _, selected=name: self.choose_theme(selected))
+        themes.addSeparator()
+        themes.addAction("Custom accent?", self.choose_accent)
+        themes.addAction("Reset accent", self.reset_accent)
+        startup = menu.addAction("Start with Windows")
+        startup.setCheckable(True)
+        startup.setChecked(self.settings.get("start_with_windows", False))
+        startup.triggered.connect(self.set_autostart)
+
         am = menu.addMenu("Animation Style")
-        for s in ["Glow Sweep", "Fluid Blobs", "Neon Border"]:
+        for s in ["Glow Sweep", "Fluid Blobs", "Neon Border", "Off"]:
             a = am.addAction(s); a.setCheckable(True); a.setChecked(self.animation_style == s); a.triggered.connect(lambda _, st=s: self.set_animation_style(st))
         sm = menu.addMenu("Island Style")
         for s in ["Default", "Liquid Glass", "Notch Nook"]:
@@ -1374,6 +1748,11 @@ class DynamicIsland(QWidget):
         menu.addSeparator(); qa = menu.addAction("Quit"); qa.triggered.connect(self.close); menu.exec(self.mapToGlobal(event.pos()))
 
     def closeEvent(self, event):
+        self.visibility_hotkey.close()
+        if self.workspace.note_timer.isActive():
+            self.workspace.save_notes()
+        self.workspace.stop_tools()
+        self.workspace.close()
                                    
         self.perf_monitor.stop()
         self.media_monitor.stop()
@@ -1381,6 +1760,7 @@ class DynamicIsland(QWidget):
         self.notif_monitor.stop()
         self.weather_monitor.stop()
         super().closeEvent(event)
+        QApplication.instance().quit()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv); island = DynamicIsland(); island.show()

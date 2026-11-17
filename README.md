@@ -1,87 +1,54 @@
-![Dynamic Island for Windows Banner](src/Dynamic%20Island%200.jpg)
+# HM-Bar
 
-# Dynamic Island for Windows
+HM-Bar is an animated desktop island for Windows. It puts music controls, a focus timer, useful system information, and an app launcher at the top of your screen. It can also display the status and recent transfers of phones connected to **AirPad for Windows**.
 
-A sleek, fluid, and highly customizable Dynamic Island for Windows built with Python and PyQt6.
+![Animated demo of HM-Bar expanding into Spotify controls and opening its app launcher](docs/assets/hm-bar-in-action.gif)
 
-# Scroll on the Panels !
+## Quick start
+
+**Download for Windows x64** from the [latest release](https://github.com/abdullah120230053-star/HM-Bar/releases/latest). Put both executables in the same folder and open `HM-Bar.exe`.
+
+**Build on Windows x64** with Python 3.11 and [uv](https://docs.astral.sh/uv/). Run these commands in PowerShell from the repository folder:
+
+```powershell
+uv venv --python 3.11 .venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+.\.venv\Scripts\python.exe main.py
+```
+
+To build portable executables, run `powershell -ExecutionPolicy Bypass -File .\build_exe.ps1`. Open `dist\HM-Bar.exe`. Keep `HM-Bar-Settings.exe` beside it so the Settings launcher works.
+
+| Gesture | Action |
+| --- | --- |
+| Hover | Expand the current panel. |
+| Scroll | Switch panels. |
+| Double-click | Open the animated app grid. |
+| Middle-click | Open the optional clipboard history. |
+| Right-click | Open settings, toggle lyrics, or quit. |
+| Ctrl+H | Hide or restore the island. |
 
 ## Features
 
-- **Fluid Animations**: Smooth transitions between states (Idle, Hover, Music, Notifications).
-- **System Monitoring**: Real-time CPU and RAM usage tracking.
-- **Media Controls**: Integrated media playback controls with album art accent color detection.
-- **Event Notifications**: Visual feedback for Caps Lock/Num Lock changes and system notifications.
-- **Customizable Appearance**: Choose between different animation styles (Glow Sweep, Fluid Blobs, Neon Border) and island styles (Default, Liquid Glass).
-- **Auto-start**: Option to start with Windows.
+- **Music:** Spotify priority, album artwork, optional synced lyrics, playback controls, and a seek bar for players that expose a Windows playback timeline.
+- **Workspace:** Focus timer, autosaving notes, and a shelf for files, images, and links you drop onto the island.
+- **Panels:** Weather, calendar and tasks, month progress, CPU and memory, storage, network, and quick Windows shortcuts.
+- **Desktop tools:** Color picking, screen OCR, a manual meeting timer, window snapping on unscaled displays, battery estimates, privacy activity indicators, and Git, npm build, and Docker status when the relevant tools are installed.
+- **Appearance:** Five themes, custom accent colors, an edge-attached Notch Nook, artwork and launcher animation, and adjustable panel motion.
 
-## Previews
+![Animated Settings preview cycling through HM-Bar themes and island shapes](docs/assets/hm-bar-settings.gif)
 
-### Default View & Smart Theming
-The island displays the current day and time by default. Its intelligent engine auto-detects your wallpaper's accent color to ensure the UI feels like a native part of your desktop.
+## Connect with AirPad
 
-![Default State](src/Dynamic%20Island%201.jpg)
+1. Open **AirPad for Windows** and HM-Bar on the same PC.
+2. Scan AirPad's usual pairing QR on your phone, or reconnect an already paired phone.
+3. Double-click HM-Bar and choose **AirPad**. The phone appears once it connects through AirPad's desktop companion.
 
-### Smart Notifications & Keyboard Status
-Stay informed with instant notification detection. The island also provides sleek visual cues when Caps Lock or Num Lock is toggled.
+The AirPad panel lets you open received files, add them to the shelf, and explicitly offer a selected file or clipboard item to the connected phone. AirPad handles pairing and acceptance. No second QR code is needed.
 
-![Notifications](src/Dynamic%20Island%202.jpg)
+Local settings, notes, and shelf data live under `%LOCALAPPDATA%\DynamicIslandPro`. Clipboard history is opt-in and held in memory. Weather and lyrics may require internet access. See the [full guide](PRO.md) for usage and limitations.
 
-### Interactive Information Panels
-Access a variety of rich widgets including real-time Weather, a detailed Calendar with progress tracking, comprehensive System Monitoring (CPU, RAM, Storage, Network), and your Daily Tasks.
+## Contributing and credits
 
-![Information Panels](src/Dynamic%20Island%203.jpg)
+When reporting an issue, include your Windows version, the panel or action involved, and steps to reproduce. For changes, run HM-Bar and Settings separately and try the affected flow. For AirPad changes, check the Windows companion and a paired phone.
 
-### Fluid Media Player
-Control your music with ease. The media player's background and animations dynamically adapt their color palette to match the album art of the currently playing track.
-
-![Music Player](src/Dynamic%20Island%205.jpg)
-
-### Basics Control Hub
-A dedicated panel for essential system tools. Quickly access Power, Sleep, and Restart controls through a fluid, scrollable interface.
-
-![Basics Panel](src/Dynamic%20Island%207.jpg)
-
-### Deep Customization
-Tailor the experience to your liking. Right-click the island to access settings for animation styles, island designs, and location preferences.
-
-![Context Menu](src/Dynamic%20Island%204.jpg)
-![Settings](src/Dynamic%20Island%206.jpg)
-
-### Notch Nook Style
-For those who prefer a more integrated look, the "Notch Nook" style replaces the floating island with a sleek, top-centered notch that anchors directly to the screen edge.
-
-![Notch Nook](src/Notch_Nook.jpg)
-
-### Showcase Gallery
-
-![Show1](src/Dynamic%20Island1.jpg)
-![Show2](src/Dynamic%20Island3.jpg)
-![Show3](src/Dynamic%20Island4.jpg)
-![Show4](src/Dynamic%20Island5.jpg)
-
-## Installation
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/rajsriv/dynamic-island-for-windows.git
-   ```
-2. Install the required dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Run the application:
-   ```bash
-   python main.py
-   ```
-
-## Dependencies
-
-- PyQt6
-- QtAwesome
-- psutil
-- winsdk (for media and notification monitoring)
-
-## License
-
-[MIT License](LICENSE)
+HM-Bar is based on [rajsriv/dynamic-island-for-windows](https://github.com/rajsriv/dynamic-island-for-windows) at commit `b4bce08`. The upstream README identifies the project as MIT and links to a license file that was absent from the source checkout. The animated demos use sample media.

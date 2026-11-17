@@ -1,22 +1,14 @@
-# Build Script for Windows Dynamic Island
-# Ensure you are in the project root and venv is active
-
-$AppName = "DynamicIsland"
-$MainScript = "main.py"
-
-Write-Host "--- Starting Build Process for $AppName ---" -ForegroundColor Cyan
-
-# Run PyInstaller with optimized flags
-# --noconsole: Hide terminal window
-# --onefile: Bundle into a single EXE
-# --collect-all: Ensure complex packages like winsdk and qtawesome are fully included
-# --hidden-import: Explicitly add winsdk if needed
-.\venv\Scripts\pyinstaller --noconsole `
-    --onefile `
-    --name $AppName `
-    --collect-all winsdk `
-    --collect-all qtawesome `
+$ErrorActionPreference = "Stop"
+Set-Location $PSScriptRoot
+# Prevent PyInstaller from resolving app DLLs against unrelated desktop runtimes.
+$env:Path = (($env:Path -split ';') | Where-Object { $_ -notmatch '[\\/]codex-runtimes[\\/]' }) -join ';'
+$python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
+& $python -m PyInstaller --clean --noconfirm --noconsole --onefile `
+    --name HM-Bar --collect-all winsdk --collect-all qtawesome `
     --hidden-import winsdk.windows.ui.notifications.management `
-    $MainScript
-
-Write-Host "--- Build Complete! Check the 'dist' folder ---" -ForegroundColor Green
+    --add-data "config.json;." main.py
+if ($LASTEXITCODE -ne 0) { throw "Island build failed ($LASTEXITCODE)." }
+& $python -m PyInstaller --clean --noconfirm --noconsole --onefile `
+    --name HM-Bar-Settings settings_app.py
+if ($LASTEXITCODE -ne 0) { throw "Settings build failed ($LASTEXITCODE)." }
+Write-Host "Built HM-Bar and HM-Bar Settings in dist."
